@@ -1,8 +1,14 @@
 """Live camera face recognition script.
 
-Usage: python live.py
+Usage:
+  python live.py                # Webcam locale (index 0)
+  python live.py --source auto  # Auto-detect RealSense D435i sur Jetson
+  python live.py --source 2     # Camera index specifique
 Press 'q' to quit.
 """
+
+import argparse
+import platform
 
 import cv2
 import numpy as np
@@ -12,6 +18,7 @@ from pathlib import Path
 from PIL import Image
 
 FACES_DIR = Path("faces")
+IS_LINUX = platform.system() == "Linux"
 
 
 def load_reference_faces(engine: FaceEngine, store: FaceVectorStore):
@@ -31,7 +38,51 @@ def load_reference_faces(engine: FaceEngine, store: FaceVectorStore):
             print(f"  Registered {name}")
 
 
+def find_realsense_index() -> int | None:
+    """Auto-detect RealSense RGB stream on /dev/video0-5."""
+    for index in range(6):
+        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            continue
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        ret, frame = cap.read()
+        cap.release()
+        if ret and frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
+            print(f"  RealSense RGB found on /dev/video{index}")
+            return index
+    return None
+
+
+def open_camera(source: str) -> cv2.VideoCapture:
+    """Open camera by index. On Linux use V4L2 + RealSense config."""
+    index = int(source)
+    if IS_LINUX:
+        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+    else:
+        cap = cv2.VideoCapture(index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open camera index {index}")
+    return cap
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Live face recognition")
+    parser.add_argument(
+        "--source", "-s", default="0",
+        help="Camera index (0), 'auto' for RealSense auto-detect",
+    )
+    args = parser.parse_args()
+
     print("Loading InsightFace model...")
     engine = FaceEngine()
     store = FaceVectorStore(data_dir="data")
@@ -40,14 +91,17 @@ def main():
     load_reference_faces(engine, store)
     print(f"{len(store.list_faces())} faces in database")
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Cannot open camera")
-        return
+    source = args.source
+    if source == "auto":
+        print("Auto-detecting RealSense...")
+        idx = find_realsense_index()
+        if idx is None:
+            print("No RealSense RGB stream found on /dev/video0-5")
+            return
+        source = str(idx)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
+    print(f"Opening camera index {source}...")
+    cap = open_camera(source)
     print("Camera ready. Press 'q' to quit.")
 
     frame_count = 0
@@ -56,9 +110,8 @@ def main():
     while True:
         ret, frame = cap.read()
         if not ret:
-            break
+            continue
 
-        # Detect every 3 frames for performance
         if frame_count % 3 == 0:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             faces = engine.detect_faces(rgb)
@@ -73,7 +126,6 @@ def main():
                     "bbox": bbox,
                 })
 
-        # Draw results
         for res in cached_results:
             x1, y1, x2, y2 = res["bbox"]
             name = res["name"]

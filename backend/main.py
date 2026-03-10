@@ -10,6 +10,7 @@ from PIL import Image
 from db.vector_store import FaceVectorStore
 from models.face_engine import FaceEngine
 from routes.faces import router as faces_router
+from routes.stream import router as stream_router
 
 FACES_DIR = Path("faces")
 
@@ -64,6 +65,7 @@ app.add_middleware(
 )
 
 app.include_router(faces_router)
+app.include_router(stream_router)
 
 
 @app.get("/api/health")
