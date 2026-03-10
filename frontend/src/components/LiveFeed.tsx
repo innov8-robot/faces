@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Video, VideoOff, Monitor, Bot } from "lucide-react";
 import {
-  recognizeFaces,
   getStreamFaces,
   stopStream,
   getMjpegUrl,
@@ -18,59 +17,20 @@ export default function LiveFeed() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const loopRef = useRef<number | null>(null);
-  const processingRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const sendingRef = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rafRef = useRef<number | null>(null);
 
   const [mode, setMode] = useState<SourceMode>("webcam");
   const [active, setActive] = useState(false);
   const [faces, setFaces] = useState<RecognizedFace[]>([]);
+  const facesRef = useRef<RecognizedFace[]>([]);
 
-  // --- Webcam mode (browser camera, for PC) ---
-  const startWebcam = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: 1280, height: 720 },
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      setActive(true);
-    } catch {
-      alert("Impossible d'acceder a la camera");
-    }
-  }, []);
+  // Keep ref in sync for the draw loop
+  useEffect(() => { facesRef.current = faces; }, [faces]);
 
-  const stopWebcam = useCallback(() => {
-    if (loopRef.current) {
-      cancelAnimationFrame(loopRef.current);
-      loopRef.current = null;
-    }
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setActive(false);
-    setFaces([]);
-  }, []);
-
-  const captureFrame = useCallback((): Promise<Blob | null> => {
-    return new Promise((resolve) => {
-      const video = videoRef.current;
-      const canvas = captureCanvasRef.current;
-      if (!video || !canvas || video.readyState < 2) {
-        resolve(null);
-        return;
-      }
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) { resolve(null); return; }
-      ctx.drawImage(video, 0, 0);
-      canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.7);
-    });
-  }, []);
-
-  const drawOverlay = useCallback((detectedFaces: RecognizedFace[]) => {
+  const drawOverlay = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
@@ -82,7 +42,7 @@ export default function LiveFeed() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    for (const face of detectedFaces) {
+    for (const face of facesRef.current) {
       const [x1, y1, x2, y2] = face.bbox;
       const isKnown = face.name !== "unknown" && face.name !== "inconnu";
       const color = isKnown ? "#22c55e" : "#ef4444";
@@ -103,55 +63,118 @@ export default function LiveFeed() {
     }
   }, []);
 
-  // Webcam recognition loop
+  // --- Capture a frame as JPEG blob ---
+  const captureFrame = useCallback((): Promise<Blob | null> => {
+    return new Promise((resolve) => {
+      const video = videoRef.current;
+      const canvas = captureCanvasRef.current;
+      if (!video || !canvas || video.readyState < 2) {
+        resolve(null);
+        return;
+      }
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { resolve(null); return; }
+      ctx.drawImage(video, 0, 0);
+      canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.7);
+    });
+  }, []);
+
+  // --- WebSocket send loop: fire-and-forget, send next frame as soon as we get a response ---
+  const sendFrame = useCallback(async () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || sendingRef.current) return;
+
+    sendingRef.current = true;
+    const blob = await captureFrame();
+    if (blob && ws.readyState === WebSocket.OPEN) {
+      ws.send(blob);
+    } else {
+      sendingRef.current = false;
+    }
+  }, [captureFrame]);
+
+  // --- Webcam mode ---
+  const startWebcam = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: 1280, height: 720 },
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
+      // Open WebSocket
+      const wsUrl = `ws://${window.location.hostname}:8000/ws/recognize`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setActive(true);
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        setFaces(data.faces);
+        sendingRef.current = false;
+        // Immediately send next frame
+        sendFrame();
+      };
+
+      ws.onerror = () => {
+        console.error("WebSocket error");
+      };
+
+      ws.onclose = () => {
+        sendingRef.current = false;
+      };
+    } catch {
+      alert("Impossible d'acceder a la camera");
+    }
+  }, [sendFrame]);
+
+  const stopWebcam = useCallback(() => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    sendingRef.current = false;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setActive(false);
+    setFaces([]);
+  }, []);
+
+  // Continuous overlay draw loop (always smooth, independent of recognition speed)
   useEffect(() => {
     if (!active || mode !== "webcam") return;
-
     let running = true;
-    let lastSendTime = 0;
-    const INTERVAL = 200; // ~5 fps
 
-    const loop = async () => {
+    const loop = () => {
       if (!running) return;
-
-      const now = Date.now();
-      if (now - lastSendTime >= INTERVAL && !processingRef.current) {
-        lastSendTime = now;
-        processingRef.current = true;
-
-        const blob = await captureFrame();
-        if (blob) {
-          try {
-            const file = new File([blob], "frame.jpg", { type: "image/jpeg" });
-            const data = await recognizeFaces(file);
-            if (running) {
-              setFaces(data.faces);
-              drawOverlay(data.faces);
-            }
-          } catch {
-            // skip
-          }
-        }
-        processingRef.current = false;
-      }
-
-      if (running) {
-        loopRef.current = requestAnimationFrame(loop);
-      }
+      drawOverlay();
+      rafRef.current = requestAnimationFrame(loop);
     };
-
-    loopRef.current = requestAnimationFrame(loop);
+    rafRef.current = requestAnimationFrame(loop);
 
     return () => {
       running = false;
-      if (loopRef.current) cancelAnimationFrame(loopRef.current);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [active, mode, captureFrame, drawOverlay]);
+  }, [active, mode, drawOverlay]);
+
+  // Kick off first frame send once active
+  useEffect(() => {
+    if (active && mode === "webcam") {
+      // Small delay to let video start
+      const t = setTimeout(() => sendFrame(), 300);
+      return () => clearTimeout(t);
+    }
+  }, [active, mode, sendFrame]);
 
   // --- Robot mode (RealSense via backend MJPEG) ---
   const startRobot = useCallback(() => {
     setActive(true);
-    // Poll detected faces from the backend stream
     pollRef.current = setInterval(async () => {
       try {
         const data = await getStreamFaces("4");
@@ -179,8 +202,9 @@ export default function LiveFeed() {
   // Cleanup
   useEffect(() => {
     return () => {
+      wsRef.current?.close();
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      if (loopRef.current) cancelAnimationFrame(loopRef.current);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
@@ -223,7 +247,6 @@ export default function LiveFeed() {
           </div>
         </div>
 
-        {/* Source selector */}
         <div className="mt-3 flex items-center gap-2">
           <Button
             variant={mode === "webcam" ? "default" : "outline"}
@@ -256,7 +279,6 @@ export default function LiveFeed() {
             </div>
           )}
 
-          {/* Webcam mode: browser video + canvas overlay */}
           {mode === "webcam" && (
             <>
               <video
@@ -273,7 +295,6 @@ export default function LiveFeed() {
             </>
           )}
 
-          {/* Robot mode: MJPEG from backend (RealSense, annotations baked in) */}
           {mode === "robot" && active && (
             <img
               src={getMjpegUrl("4")}
@@ -283,7 +304,6 @@ export default function LiveFeed() {
           )}
         </div>
 
-        {/* Detected faces badges */}
         {faces.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {faces.map((face, i) => {
