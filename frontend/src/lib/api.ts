@@ -1,6 +1,7 @@
 import axios from "axios";
 
-export const API_BASE = "http://localhost:8000/api";
+// Use same host as the frontend (works on localhost and on the robot's IP)
+export const API_BASE = `http://${window.location.hostname}:8000/api`;
 
 const api = axios.create({
   baseURL: API_BASE,
