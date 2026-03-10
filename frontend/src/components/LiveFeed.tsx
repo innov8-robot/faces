@@ -109,7 +109,7 @@ export default function LiveFeed() {
 
     let running = true;
     let lastSendTime = 0;
-    const INTERVAL = 500;
+    const INTERVAL = 200; // ~5 fps
 
     const loop = async () => {
       if (!running) return;
