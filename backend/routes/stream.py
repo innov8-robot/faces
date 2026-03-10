@@ -13,8 +13,8 @@ router = APIRouter(prefix="/api/stream", tags=["stream"])
 _lock = threading.Lock()
 _streams: dict[str, dict] = {}
 
-# Auto-detect: on Linux (Jetson) use V4L2 + RealSense config
 IS_LINUX = platform.system() == "Linux"
+G1_CAMERA_INDEX = 4
 
 
 def _open_camera(source: str) -> cv2.VideoCapture:
@@ -37,38 +37,10 @@ def _open_camera(source: str) -> cv2.VideoCapture:
     return cap
 
 
-def _find_realsense_index() -> int | None:
-    """Auto-detect RealSense RGB stream index on Linux."""
-    for index in range(6):
-        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            continue
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        ret, frame = cap.read()
-        cap.release()
-        if ret and frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
-            return index
-    return None
-
-
 def _recognize_loop(source: str, engine, store):
     """Background thread: read frames, run recognition, store latest result."""
     state = _streams[source]
-
-    if source == "auto":
-        # Auto-detect RealSense on Jetson
-        idx = _find_realsense_index()
-        if idx is None:
-            print("No RealSense RGB stream found")
-            state["running"] = False
-            return
-        print(f"RealSense RGB found on /dev/video{idx}")
-        cap = _open_camera(str(idx))
-    else:
-        cap = _open_camera(source)
+    cap = _open_camera(source)
 
     if not cap.isOpened():
         print(f"Cannot open camera source: {source}")
@@ -148,7 +120,7 @@ def _ensure_stream(source: str, engine, store):
 @router.get("/mjpeg")
 async def mjpeg_stream(
     request: Request,
-    source: str = Query(default="auto", description="Camera index (0-5) or 'auto' for RealSense auto-detect"),
+    source: str = Query(default=str(G1_CAMERA_INDEX), description="Camera index (default: 4 for G1 RealSense)"),
 ):
     """MJPEG stream with face recognition overlays."""
     engine = request.app.state.face_engine
@@ -184,7 +156,7 @@ async def mjpeg_stream(
 @router.get("/faces")
 async def stream_faces(
     request: Request,
-    source: str = Query(default="auto"),
+    source: str = Query(default=str(G1_CAMERA_INDEX)),
 ):
     """Get current detected faces from the active stream."""
     with _lock:
@@ -196,7 +168,7 @@ async def stream_faces(
 
 @router.post("/stop")
 async def stop_stream(
-    source: str = Query(default="auto"),
+    source: str = Query(default=str(G1_CAMERA_INDEX)),
 ):
     """Stop an active stream."""
     with _lock:

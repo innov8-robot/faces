@@ -154,7 +154,7 @@ export default function LiveFeed() {
     // Poll detected faces from the backend stream
     pollRef.current = setInterval(async () => {
       try {
-        const data = await getStreamFaces("auto");
+        const data = await getStreamFaces("4");
         setFaces(data.faces);
       } catch {
         // skip
@@ -168,7 +168,7 @@ export default function LiveFeed() {
       pollRef.current = null;
     }
     try {
-      await stopStream("auto");
+      await stopStream("4");
     } catch {
       // ignore
     }
@@ -276,7 +276,7 @@ export default function LiveFeed() {
           {/* Robot mode: MJPEG from backend (RealSense, annotations baked in) */}
           {mode === "robot" && active && (
             <img
-              src={getMjpegUrl("auto")}
+              src={getMjpegUrl("4")}
               alt="Robot camera stream"
               className="w-full"
             />

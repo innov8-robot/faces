@@ -1,8 +1,7 @@
 """Live camera face recognition script.
 
 Usage:
-  python live.py                # Webcam locale (index 0)
-  python live.py --source auto  # Auto-detect RealSense D435i sur Jetson
+  python live.py                # PC: webcam 0 / G1: RealSense index 4
   python live.py --source 2     # Camera index specifique
 Press 'q' to quit.
 """
@@ -38,22 +37,7 @@ def load_reference_faces(engine: FaceEngine, store: FaceVectorStore):
             print(f"  Registered {name}")
 
 
-def find_realsense_index() -> int | None:
-    """Auto-detect RealSense RGB stream on /dev/video0-5."""
-    for index in range(6):
-        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            continue
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        ret, frame = cap.read()
-        cap.release()
-        if ret and frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
-            print(f"  RealSense RGB found on /dev/video{index}")
-            return index
-    return None
+G1_CAMERA_INDEX = 4
 
 
 def open_camera(source: str) -> cv2.VideoCapture:
@@ -78,8 +62,9 @@ def open_camera(source: str) -> cv2.VideoCapture:
 def main():
     parser = argparse.ArgumentParser(description="Live face recognition")
     parser.add_argument(
-        "--source", "-s", default="0",
-        help="Camera index (0), 'auto' for RealSense auto-detect",
+        "--source", "-s",
+        default=str(G1_CAMERA_INDEX) if IS_LINUX else "0",
+        help=f"Camera index (default: {G1_CAMERA_INDEX} on G1, 0 on PC)",
     )
     args = parser.parse_args()
 
@@ -92,14 +77,6 @@ def main():
     print(f"{len(store.list_faces())} faces in database")
 
     source = args.source
-    if source == "auto":
-        print("Auto-detecting RealSense...")
-        idx = find_realsense_index()
-        if idx is None:
-            print("No RealSense RGB stream found on /dev/video0-5")
-            return
-        source = str(idx)
-
     print(f"Opening camera index {source}...")
     cap = open_camera(source)
     print("Camera ready. Press 'q' to quit.")
